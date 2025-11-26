@@ -1,4 +1,7 @@
-# ---------- TICKET SYSTEM (start of file through panel command) ----------
+# main.py — Ticket system single-file (prefix commands, persistent buttons)
+# Paste this entire file into your main.py and restart the bot.
+# Make sure DISCORD_BOT_TOKEN is set in your environment (Replit Secrets).
+
 import os
 import json
 import asyncio
@@ -7,20 +10,22 @@ from datetime import datetime
 import discord
 from discord.ext import commands
 from discord import ui
-from keep_alive import keep_alive
 
-# ---------- CONFIG ----------
+# If you use keep_alive.py on Replit, it should define keep_alive()
+try:
+    from keep_alive import keep_alive
+except Exception:
+    def keep_alive():
+        return None
+
+# ------------- CONFIG -------------
 PREFIX = "*"
 INTENTS = discord.Intents.all()
 bot = commands.Bot(command_prefix=PREFIX, intents=INTENTS)
 
-@bot.event
-async def on_ready():
-    print("Bot is running...")
-    Print(f"Logged in as {bot.user}")
+# ---------- CHANNEL / ROLE IDS (your confirmed values) ----------
+PANEL_CHANNEL_ID = 1439090812289024140   # where the ticket panel will be posted
 
-# Panel & categories (use the IDs you gave)
-PANEL_CHANNEL_ID = 1439090812289024140  # where *panel command will post
 CATEGORY_MAP = {
     "order":       1442732426488054043,
     "suggestions": 1442720316861190185,
@@ -30,34 +35,50 @@ CATEGORY_MAP = {
     "scam":        1442732547279945799
 }
 
-# Roles (confirmed by you)
+VERIFY_ROLE_ID = 1439125802934472856
+LOG_CHANNEL_ID = 1442720316861190185  # optional log channel
+
+# Roles (confirmed)
 OWNER_ROLE_ID = 1439122245590057044
 COOWNER_ROLE_ID = 1439089267899895900
 MODERATOR_ROLE_ID = 1439095082572578908
 STAFF_ROLE_ID = 1439096539979972742
 
-# Who counts as staff (can vouch/close and be pinged)
 STAFF_ROLES = [STAFF_ROLE_ID, MODERATOR_ROLE_ID, COOWNER_ROLE_ID, OWNER_ROLE_ID]
-
-# Come-team ping list (when owner presses Come Team)
 COME_TEAM_ROLE_IDS = [MODERATOR_ROLE_ID, COOWNER_ROLE_ID, OWNER_ROLE_ID]
 
-# Ticket types data (labels, emoji, descriptions)
-TICKET_TYPES = {
-    "order":       {"label": "Order",       "emoji": "🛒", "desc": "Provide item, amount & payment method."},
-    "suggestions": {"label": "Suggestions", "emoji": "💡", "desc": "Share ideas to improve the server."},
-    "partnership": {"label": "Partnership", "emoji": "🤝", "desc": "Business or collab inquiries."},
-    "apply":       {"label": "ApplyStaff",  "emoji": "📝", "desc": "Apply to join staff (answer inside)."},
-    "support":     {"label": "Support",     "emoji": "🎧", "desc": "Report bugs and errors."},
-    "scam":        {"label": "Report Scammer","emoji": "🚨","desc":"Provide usernames/screens and proof."}
+# Reaction-role mapping (emoji -> role name)
+REACTION_ROLES = {
+    "🌐": "Maxed Land Ping",
+    "🌲": "Wood Drops Ping",
+    "🏡": "Bases Ping",
+    "🎁": "Gift Truckloads Ping",
+    "💸": "Lumber Bucks Ping",
+    "💌": "Pink Items Ping",
+    "📦": "Gift Drops Ping",
+    "🪓": "Axe Drops Ping",
+    "🔐": "Accounts Ping",
+    "🎉": "Giveaways Ping",
+    "📢": "Announcement Ping"
 }
 
-TICKET_FOOTER = "Ticket System"
+# Ticket types & descriptions
+TICKET_TYPES = {
+    "order":       {"label": "Order",       "emoji": "🛒", "desc": "Provide item, amount and payment method."},
+    "suggestions": {"label": "Suggestions", "emoji": "💡", "desc": "Share ideas to improve the server."},
+    "partnership": {"label": "Partnership", "emoji": "🤝", "desc": "Business or collaboration inquiries."},
+    "apply":       {"label": "ApplyStaff",  "emoji": "📝", "desc": "Apply to join staff — answer the questions posted."},
+    "support":     {"label": "Support",     "emoji": "🎧", "desc": "Support — report bugs and errors."},
+    "scam":        {"label": "Report Scammer","emoji": "🚨","desc":"Report scammers with proof/screens."}
+}
 
-# Ticket counter file & lock
+TICKET_FOOTER = "Ticket System • Crystal Neon"
+
+# Counters file & lock
 COUNTERS_FILE = "ticket_counters.json"
 COUNTERS_LOCK = asyncio.Lock()
 
+# ------------- COUNTER HELPERS -------------
 async def ensure_counters():
     async with COUNTERS_LOCK:
         if not os.path.exists(COUNTERS_FILE):
@@ -87,7 +108,7 @@ async def next_ticket_number(ticket_type: str) -> int:
             json.dump(data, f)
         return data[ticket_type]
 
-# ---------- HELPERS ----------
+# ------------- HELPERS -------------
 def is_staff_member(member: discord.Member) -> bool:
     if member is None:
         return False
@@ -96,18 +117,21 @@ def is_staff_member(member: discord.Member) -> bool:
 def mention_roles(role_ids):
     return " ".join(f"<@&{rid}>" for rid in role_ids)
 
-# ---------- ON READY: register persistent panel view ----------
+# ------------- PERSISTENT VIEWS REGISTER ON READY -------------
 @bot.event
 async def on_ready():
     try:
-        bot.add_view(TicketPanelView())   # persistent panel
-        print("TicketPanelView registered.")
+        # register persistent views so button callbacks survive restarts
+        bot.add_view(TicketPanelView())
+        bot.add_view(VerifyView())
+        print("Persistent views registered.")
     except Exception as e:
-        print("Error registering panel view:", e)
+        print("View registration failed:", e)
+
     print(f"✅ Logged in as {bot.user} (id: {bot.user.id})")
     await ensure_counters()
 
-# ---------- MANAGEMENT VIEW (per-ticket) ----------
+# ------------- MANAGEMENT VIEW (per-ticket) -------------
 class TicketManageView(ui.View):
     def __init__(self, ticket_creator: discord.Member):
         super().__init__(timeout=None)
@@ -128,12 +152,14 @@ class TicketManageView(ui.View):
             return
         self.claimed = True
         self.claimed_by = interaction.user
-        # update embed message if exists
+
+        # edit the ticket embed (best-effort)
         try:
             msg = await interaction.channel.fetch_message(interaction.message.id)
             if msg and msg.embeds:
                 e = msg.embeds[0]
-                # change Status and Claimed By fields (try-safe)
+                # attempt to update Status and Claimed By fields
+                # fields order: Creator, Created, Status, Ticket Type, Claimed By
                 for i, f in enumerate(e.fields):
                     if f.name.lower().startswith("status"):
                         e.set_field_at(i, name="Status", value=f"Claimed by {interaction.user.display_name}", inline=False)
@@ -142,12 +168,13 @@ class TicketManageView(ui.View):
                 await msg.edit(embed=e, view=self)
         except Exception:
             pass
+
         await interaction.response.send_message(f"✨ Ticket claimed by {interaction.user.mention}", ephemeral=False)
 
     # Success button — OWNER or staff helpers allowed
     @ui.button(label="Success", style=discord.ButtonStyle.success)
     async def success_button(self, interaction: discord.Interaction, button: ui.Button):
-        # allowed: staff roles (we treat staff roles as helpers) or owner
+        # allowed: any STAFF_ROLES or owner
         allowed = any(role.id in STAFF_ROLES for role in interaction.user.roles)
         if not allowed:
             await interaction.response.send_message("❌ Only Owner or staff helpers can confirm success.", ephemeral=True)
@@ -159,7 +186,7 @@ class TicketManageView(ui.View):
             await interaction.response.send_message("❗ Already marked as success.", ephemeral=True)
             return
         self.success = True
-        await interaction.response.send_message(f"✅ Order marked **successful** by {interaction.user.mention}. Buyer may now vouch.", ephemeral=False)
+        await interaction.response.send_message(f"✅ Marked successful by {interaction.user.mention}. Buyer may now vouch.", ephemeral=False)
 
     # Vouch — BUYER ONLY and only after success
     @ui.button(label="Vouch ⭐", style=discord.ButtonStyle.secondary)
@@ -168,9 +195,19 @@ class TicketManageView(ui.View):
             await interaction.response.send_message("❌ Only the buyer can vouch.", ephemeral=True)
             return
         if not self.success:
-            await interaction.response.send_message("❌ You can vouch only after the Owner/staff confirms success.", ephemeral=True)
+            await interaction.response.send_message("❌ You can vouch only after Owner/staff confirms success.", ephemeral=True)
             return
         await interaction.response.send_message("✨ Thank you for the vouch!", ephemeral=True)
+
+    # Come Team — OWNER only: pings mod/co-owner/owner
+    @ui.button(label="Come Team 👑", style=discord.ButtonStyle.secondary)
+    async def cometeam_button(self, interaction: discord.Interaction, button: ui.Button):
+        owner_role_obj = interaction.guild.get_role(OWNER_ROLE_ID)
+        if owner_role_obj is None or owner_role_obj not in interaction.user.roles:
+            await interaction.response.send_message("❌ Only the Owner can call the team.", ephemeral=True)
+            return
+        ping_text = mention_roles(COME_TEAM_ROLE_IDS)
+        await interaction.response.send_message(f"📣 Come team! {ping_text}", ephemeral=False)
 
     # Close — staff/owner can close (delete channel)
     @ui.button(label="Close 🗑️", style=discord.ButtonStyle.danger)
@@ -189,15 +226,14 @@ class TicketManageView(ui.View):
             except Exception:
                 pass
 
-# ---------- FUNCTION TO CREATE A TICKET ----------
+# ------------- CREATE TICKET FUNCTION -------------
 async def create_ticket_for(interaction: discord.Interaction, ticket_key: str):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
     user = interaction.user
     if guild is None:
-        return await interaction.followup.send("This command can't be used in DMs.", ephemeral=True)
+        return await interaction.followup.send("This can't be used in DMs.", ephemeral=True)
 
-    # find category id
     cat_id = CATEGORY_MAP.get(ticket_key)
     if not cat_id:
         return await interaction.followup.send("Invalid ticket type.", ephemeral=True)
@@ -206,35 +242,39 @@ async def create_ticket_for(interaction: discord.Interaction, ticket_key: str):
     if category is None:
         return await interaction.followup.send("Ticket category not found. Check category IDs.", ephemeral=True)
     if not isinstance(category, discord.CategoryChannel):
-        return await interaction.followup.send("Provided category ID is not a category. Use the category ID.", ephemeral=True)
+        return await interaction.followup.send("Category ID is not a category. Use the category ID.", ephemeral=True)
 
-    # numbering
-    num = await next_ticket_number(ticket_key)
-    channel_name = f"{ticket_key}-{num:03d}"
+    # numbering & name
+    number = await next_ticket_number(ticket_key)
+    channel_name = f"{ticket_key}-{number:03d}"
 
-    # avoid duplicates
+    # prevent duplicate
     for ch in guild.text_channels:
         if ch.name == channel_name:
             return await interaction.followup.send("A ticket with that name already exists — contact staff.", ephemeral=True)
 
-    # overwrites: hide @everyone, allow buyer and staff+owner
+    # overwrites
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
     }
-    # owner + staff roles
+    # add staff roles
     for rid in STAFF_ROLES:
-        role_obj = guild.get_role(rid)
-        if role_obj:
-            overwrites[role_obj] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        role = guild.get_role(rid)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
     try:
-        channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=category,
-                                                  reason=f"Ticket {ticket_key} opened by {user}")
+        channel = await guild.create_text_channel(
+            name=channel_name,
+            overwrites=overwrites,
+            category=category,
+            reason=f"{TICKET_TYPES[ticket_key]['label']} ticket opened by {user}"
+        )
     except Exception:
         return await interaction.followup.send("I couldn't create the ticket channel (missing Manage Channels permission?).", ephemeral=True)
 
-    # ping owner + buyer in ticket channel
+    # ping owner + buyer (best-effort)
     try:
         owner_role = guild.get_role(OWNER_ROLE_ID)
         pings = []
@@ -245,12 +285,14 @@ async def create_ticket_for(interaction: discord.Interaction, ticket_key: str):
     except Exception:
         pass
 
-    # ticket embed
+    # embed in ticket
     desc = TICKET_TYPES[ticket_key].get("desc", f"{user.mention}, staff will assist you shortly.")
-    embed = discord.Embed(title=f"{TICKET_TYPES[ticket_key]['emoji']} {TICKET_TYPES[ticket_key]['label']}",
-                          description=desc,
-                          color=0x6A00FF,
-                          timestamp=datetime.utcnow())
+    embed = discord.Embed(
+        title=f"{TICKET_TYPES[ticket_key]['emoji']} {TICKET_TYPES[ticket_key]['label']}",
+        description=desc,
+        color=0x6A00FF,
+        timestamp=datetime.utcnow()
+    )
     embed.add_field(name="Creator", value=user.mention, inline=False)
     embed.add_field(name="Created", value=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"), inline=False)
     embed.add_field(name="Status", value="Open", inline=False)
@@ -258,147 +300,143 @@ async def create_ticket_for(interaction: discord.Interaction, ticket_key: str):
     embed.add_field(name="Claimed By", value="Unclaimed", inline=False)
     embed.set_footer(text=TICKET_FOOTER)
 
-    # send embed + management view
     manage_view = TicketManageView(ticket_creator=user)
     ticket_msg = await channel.send(embed=embed, view=manage_view)
 
     await interaction.followup.send(f"✅ Ticket created: {channel.mention}", ephemeral=True)
 
-# ---------- PANEL VIEW (posted with *panel) ----------
+# ------------- TICKET PANEL VIEW -------------
 class TicketPanelView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        # create a button for each ticket type — aesthetic styles
-        order_btn = ui.Button(label="Order", emoji="🛒", style=discord.ButtonStyle.primary)
-        order_btn.callback = lambda i, b, k="order": create_ticket_for_callback(i, k)
-        self.add_item(order_btn)
+        # create a button per ticket type (aesthetic)
+        for key, info in TICKET_TYPES.items():
+            btn = ui.Button(label=info["label"], emoji=info["emoji"], style=discord.ButtonStyle.primary if key=="order" else discord.ButtonStyle.secondary)
+            # bind callback using closure
+            async def _cb(interaction: discord.Interaction, k=key):
+                await create_ticket_for(interaction, k)
+            btn.callback = _cb
+            self.add_item(btn)
 
-        suggest_btn = ui.Button(label="Suggestions", emoji="💡", style=discord.ButtonStyle.secondary)
-        suggest_btn.callback = lambda i, b, k="suggestions": create_ticket_for_callback(i, k)
-        self.add_item(suggest_btn)
-
-        part_btn = ui.Button(label="Partnership", emoji="🤝", style=discord.ButtonStyle.secondary)
-        part_btn.callback = lambda i, b, k="partnership": create_ticket_for_callback(i, k)
-        self.add_item(part_btn)
-
-        apply_btn = ui.Button(label="Apply Staff", emoji="📝", style=discord.ButtonStyle.secondary)
-        apply_btn.callback = lambda i, b, k="apply": create_ticket_for_callback(i, k)
-        self.add_item(apply_btn)
-
-        support_btn = ui.Button(label="Support", emoji="🎧", style=discord.ButtonStyle.secondary)
-        support_btn.callback = lambda i, b, k="support": create_ticket_for_callback(i, k)
-        self.add_item(support_btn)
-
-        scam_btn = ui.Button(label="Report Scammer", emoji="🚨", style=discord.ButtonStyle.danger)
-        scam_btn.callback = lambda i, b, k="scam": create_ticket_for_callback(i, k)
-        self.add_item(scam_btn)
-
-# helper wrapper because lambda callback needs to be async
-def create_ticket_for_callback(interaction: discord.Interaction, ticket_key: str):
-    # wrapper to call async function create_ticket_for
-    return asyncio.create_task(create_ticket_for(interaction, ticket_key))
-
-# ---------- PANEL COMMAND (prefix *) ----------
+# ------------- PANEL COMMAND (prefix *) -------------
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def panel(ctx):
-    """Post the ticket panel (admin only)."""
-    if ctx.channel.id != PANEL_CHANNEL_ID:
-        # if you want it only in a specific channel, inform user
-        await ctx.send(f"Use this command in the designated panel channel (ID: {PANEL_CHANNEL_ID}).", delete_after=8)
-        return
-
+    """Post the ticket panel in the panel channel (admin only)."""
+    panel_ch = bot.get_channel(PANEL_CHANNEL_ID)
+    if panel_ch is None:
+        return await ctx.send("❌ Panel channel not found. Check PANEL_CHANNEL_ID.")
     embed = discord.Embed(
-        title="🎫 Ticket Panel",
-        description=(
-            "**Click a button to open a ticket.**\n\n"
-            "• Order — purchases & orders\n"
-            "• Suggestions — ideas & feedback\n"
-            "• Partnership — business/collabs\n"
-            "• Apply Staff — apply to be staff\n"
-            "• Support — report bugs & errors\n"
-            "• Report Scammer — report suspicious users\n        "
-        ),
-        color=0x2ECC71
+        title="🎫 Ticket Center",
+        description="Click a button below to open a ticket.",
+        color=0x7A00FF
     )
-    embed.set_footer(text="Ticket System • Click a button below")
-    await ctx.send(embed=embed, view=TicketPanelView())
+    embed.set_footer(text="Ticket System • Click a button")
+    await panel_ch.send(embed=embed, view=TicketPanelView())
+    await ctx.send(f"✅ Ticket panel posted in {panel_ch.mention}", delete_after=6)
 
-# ============================
-# ⭐ VERIFICATION SYSTEM ⭐
-# ============================
-
-VERIFY_CHANNEL_ID = 1439090812289024140      # Where the verify panel is sent
-VERIFY_ROLE_ID = 1439125802934472856         # Role given after verification
-
-class VerifyButton(discord.ui.View):
+# ------------- VERIFICATION VIEW -------------
+class VerifyView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Verify", style=discord.ButtonStyle.green, emoji="✅", custom_id="verify_button")
-    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @ui.button(label="Verify", style=discord.ButtonStyle.success, emoji="✅")
+    async def verify(self, interaction: discord.Interaction, button: ui.Button):
         role = interaction.guild.get_role(VERIFY_ROLE_ID)
-
+        if role is None:
+            return await interaction.response.send_message("Verify role not found. Ask an admin.", ephemeral=True)
         if role in interaction.user.roles:
-            return await interaction.response.send_message(
-                "You are already verified!", ephemeral=True
-            )
+            return await interaction.response.send_message("You are already verified.", ephemeral=True)
+        try:
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message("✅ You are now verified!", ephemeral=True)
+        except Exception:
+            await interaction.response.send_message("Failed to add verify role (missing perms).", ephemeral=True)
 
-        await interaction.user.add_roles(role)
-        await interaction.response.send_message(
-            "You have been verified successfully! 🎉", ephemeral=True
-        )
-
-# Send the verification panel
 @bot.command()
-async def verifysetup(ctx):
-    embed = discord.Embed(
-        title="🔐 Verification Required",
-        description="Click the **Verify** button below to access the server.",
-        color=discord.Color.green()
-    )
-    view = VerifyButton()
-    await ctx.send(embed=embed, view=view)
+@commands.has_permissions(administrator=True)
+async def verifypanel(ctx):
+    embed = discord.Embed(title="🔒 Verification", description="Click the button to verify and get access.", color=0x2ecc71)
+    await ctx.send(embed=embed, view=VerifyView())
 
-# Activate the button on bot startup
+# ------------- REACTION ROLES PANEL -------------
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def sendreactionroles(ctx):
+    channel = bot.get_channel(PANEL_CHANNEL_ID)
+    if channel is None:
+        return await ctx.send("❌ Panel channel not found. Check PANEL_CHANNEL_ID.")
+    embed = discord.Embed(title="🌟 Choose Your Ping Roles", description="\n".join([f"{e} — **{n}**" for e, n in REACTION_ROLES.items()]), color=0x8A2BE2)
+    msg = await channel.send(embed=embed)
+    for e in REACTION_ROLES.keys():
+        try:
+            await msg.add_reaction(e)
+        except Exception:
+            pass
+    await ctx.send("✅ Reaction role panel posted.", delete_after=6)
+
 @bot.event
-async def on_ready():
-    bot.add_view(VerifyButton())
-    print(f"✅ Verification system loaded — Logged in as {bot.user}")
+async def on_raw_reaction_add(payload):
+    if payload.channel_id != PANEL_CHANNEL_ID:
+        return
+    if payload.user_id == bot.user.id:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+    emoji = str(payload.emoji)
+    if emoji not in REACTION_ROLES:
+        return
+    role_name = REACTION_ROLES[emoji]
+    role = discord.utils.get(guild.roles, name=role_name)
+    if role is None:
+        return
+    member = guild.get_member(payload.user_id)
+    if member is None or member.bot:
+        return
+    try:
+        await member.add_roles(role)
+    except Exception:
+        pass
 
-#===============================
-# ROLES SYSTEM
-#===============================
+@bot.event
+async def on_raw_reaction_remove(payload):
+    if payload.channel_id != PANEL_CHANNEL_ID:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+    emoji = str(payload.emoji)
+    if emoji not in REACTION_ROLES:
+        return
+    role_name = REACTION_ROLES[emoji]
+    role = discord.utils.get(guild.roles, name=role_name)
+    if role is None:
+        return
+    member = guild.get_member(payload.user_id)
+    if member is None or member.bot:
+        return
+    try:
+        await member.remove_roles(role)
+    except Exception:
+        pass
+
+# ------------- UTIL COMMANDS -------------
 @bot.command()
-async def autoroles(ctx):
-    embed = discord.Embed(
-        title="🌟 Choose Your Ping Roles",
-        description="React below to get the roles you want!",
-        color=discord.Color.blue()
-    )
+async def ping(ctx):
+    await ctx.send("Pong!")
 
-    embed.add_field(name="🌐 — Maxed Land Ping", value="React: 🌐", inline=False)
-    embed.add_field(name="🌲 — Wood Drops Ping", value="React: 🌲", inline=False)
-    embed.add_field(name="🏘️ — Bases Ping", value="React: 🏘️", inline=False)
-    embed.add_field(name="🎁 — Gift Truckloads Ping", value="React: 🎁", inline=False)
-    embed.add_field(name="💵 — Lumber Bucks Ping", value="React: 💵", inline=False)
-    embed.add_field(name="💌 — Pink Items Ping", value="React: 💌", inline=False)
-    embed.add_field(name="📦 — Gift Drops Ping", value="React: 📦", inline=False)
-    embed.add_field(name="🪓 — Axe Drops Ping", value="React: 🪓", inline=False)
-    embed.add_field(name="🔐 — Accounts Ping", value="React: 🔐", inline=False)
-    embed.add_field(name="🎉 — Giveaways Ping", value="React: 🎉", inline=False)
-    embed.add_field(name="📢 — Announcement Ping", value="React: 📢", inline=False)
+@bot.command()
+@commands.has_permissions(manage_messages=True)
+async def clear(ctx, amount: int = 10):
+    await ctx.channel.purge(limit=amount + 1)
+    await ctx.send(f"🧹 Cleared {amount} messages.", delete_after=5)
 
-    msg = await ctx.send(embed=embed)
-
-    emojis = ["🌐","🌲","🏘️","🎁","💵","💌","📦","🪓","🔐","🎉","📢"]
-    for emoji in emojis:
-        await msg.add_reaction(emoji)
-
-    print(f"Reaction role message ID: {msg.id}")
-    
-# ================================
-# RUN BOT
-# ================================
-keep_alive()
-bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+# ------------- RUN -------------
+if __name__ == "__main__":
+    keep_alive()
+    TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+    if not TOKEN:
+        print("No DISCORD_BOT_TOKEN env var found — using placeholder 'bayot'. Replace with real token in env.")
+        TOKEN = "TOKEN"
+    bot.run(TOKEN)
