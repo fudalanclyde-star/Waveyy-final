@@ -401,4 +401,4 @@ async def autoroles(ctx):
 # RUN BOT
 # ================================
 keep_alive()
-bot.run("DISCORD_BOT_TOKEN")
+bot.run(os.getenv("DISCORD_BOT_TOKEN"))
