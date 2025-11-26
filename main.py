@@ -1,22 +1,17 @@
 # main.py — Ticket system single-file (prefix commands, persistent buttons)
 # Paste this entire file into your main.py and restart the bot.
-# Make sure DISCORD_BOT_TOKEN is set in your environment (Replit Secrets).
+# Make sure DISCORD_BOT_TOKEN is set in your environment (Replit Secret
 
-import os
-import json
-import asyncio
-from datetime import datetime
-
+#-------------------- IMPORTS --------------------
 import discord
+import os
 from discord.ext import commands
-from discord import ui
+from dotenv import load_dotenv
 
-# If you use keep_alive.py on Replit, it should define keep_alive()
-try:
-    from keep_alive import keep_alive
-except Exception:
-    def keep_alive():
-        return None
+# Load .env
+load_dotenv()
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+
 
 # ------------- CONFIG -------------
 PREFIX = "*"
